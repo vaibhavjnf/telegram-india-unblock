@@ -42,11 +42,16 @@ A single script, `telegram_proxy_failover.py`, run on a 5-minute timer. Every ti
 | Situation | Action |
 |---|---|
 | `api.telegram.org` reachable **directly** | Remove the proxy, go direct, restart gateway once. (Block lifted → back to normal.) |
-| Blocked, current proxy **still works** | **Do nothing.** No restart, no churn. |
-| Blocked, current proxy **dead / unset** | Pick the first **live** SOCKS5 exit from the pool, write `TELEGRAM_PROXY`, restart gateway once. |
+| Blocked, current proxy **still works** + poll flowing | **Do nothing.** No restart, no churn. |
+| Blocked, proxy **reachable but the poll has wedged** (gateway went silent ≥ 8 min) | Force **one** restart to re-establish a clean long-poll. Cooldown prevents a restart loop. |
+| Blocked, current proxy **dead / unset** | Pick the **fastest live** SOCKS5 exit from the pool, write `TELEGRAM_PROXY`, restart gateway once. |
 | Blocked, whole pool **dead** | Fetch a fresh free SOCKS5 list (per country), find a live one, use it. |
 
-It only restarts your gateway when the working proxy **actually changes**, so running it every 5 minutes is cheap and quiet.
+It only restarts your gateway when the working proxy **actually changes** (or to clear a wedged poll, at most once per cooldown window), so running it every 5 minutes is cheap and quiet.
+
+### The "silent wedge" problem (why v2 exists)
+
+Free SOCKS5 exits are flaky. A marginal one (~1-in-3 failure) can **stall the Telegram long-poll with no error at all** — the proxy still tests healthy, but the gateway goes quiet and stops replying. v1 only rotated on a *fully dead* proxy, so it missed this. v2 watches the gateway log: if Telegram has been silent past a threshold (`TGFAILOVER_MAX_SILENT_MIN`, default 8) while the gateway is up and a proxy is reachable, it forces a single clean restart. It also now **ranks exits by latency** and picks the fastest, not just the first that answers.
 
 Hermes already knows how to use `TELEGRAM_PROXY` (both the in-gateway polling adapter and the standalone `send_message` path read it and pass it to `httpx` / `python-telegram-bot`). This hotfix just keeps that variable pointed at something that *works*, forever, without you.
 
@@ -110,6 +115,9 @@ No bridge process needed — `httpx` (Hermes' HTTP client) speaks `socks5h://` n
 | `TGFAILOVER_COUNTRIES` | `SG US` | exit-country priority |
 | `TGFAILOVER_POOL_FILE` | `./proxy_pool.txt` | the SOCKS5 pool |
 | `TGFAILOVER_ENV_FILE` | `$HERMES_HOME/.env` | where `TELEGRAM_PROXY` is written |
+| `TGFAILOVER_GATEWAY_LOG` | `$HERMES_HOME/logs/gateway.log` | log watched for a wedged (silent) poll |
+| `TGFAILOVER_MAX_SILENT_MIN` | `8` | force a restart if Telegram is silent this long while a proxy is reachable |
+| `TGFAILOVER_RESTART_COOLDOWN_MIN` | `12` | min minutes between forced restarts (anti-loop) |
 
 Multiple Hermes profiles? Point `TGFAILOVER_ENV_FILE` / `HERMES_HOME` at each profile's `.env` and install one timer per profile (or just heal them all from one script — PRs welcome).
 
