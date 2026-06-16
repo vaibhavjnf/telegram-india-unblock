@@ -1,0 +1,10 @@
+# SOCKS5 exits for Telegram unblock. Format: "CC host:port", one per line.
+# CC = ISO country (SG/US/...). Lines beginning with # are comments.
+# The failover script tests these in country-priority order (SG first: closest
+# to India, lowest latency). Free proxies rot — the script auto-fetches fresh
+# ones and appends the live finds here. Add your own known-good exits anytime.
+SG 51.79.177.162:1010
+US 141.148.158.143:1080
+SG 43.156.84.41:10808
+SG 18.142.59.161:3128
+US 52.34.5.79:10808

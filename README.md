@@ -1,0 +1,134 @@
+# telegram-india-unblock 🇮🇳🚫📡
+
+**Your bot went silent. It's not your code. India blocked Telegram again.**
+
+A tiny, self-healing hotfix that keeps a [Hermes](https://github.com/NousResearch/hermes-agent) (Claude Code) gateway's **Telegram** channel alive when your ISP blocks `api.telegram.org` — by routing the Bot API through a live SOCKS5 exit, and re-routing automatically as proxies die or the block lifts.
+
+Pure stdlib Python + `curl`. No new dependencies. One command to install. Goes back to a direct connection on its own the moment the block lifts.
+
+---
+
+## The story: India has gone mad
+
+On a normal Tuesday in June 2026, half of India woke up to dead Telegram bots, dead Telegram apps, dead `web.telegram.org`. Not a Telegram outage — Telegram was up everywhere else on Earth. **Indian ISPs (Jio and friends) were null-routing Telegram's IP ranges again.**
+
+This is not new. India has a long, exhausting habit of blocking Telegram in waves — sometimes for "exam leaks," sometimes for "national security," sometimes for nothing anyone will put in writing. The block is crude: drop TCP to the IP blocks that serve `api.telegram.org`. Your DNS still resolves. Every other site loads. Only Telegram dies.
+
+If you run an always-on agent (a Hermes/Claude Code gateway, a notification bot, anything that *lives* on the Telegram Bot API), the symptom looks like a bug in **your** stack:
+
+```
+[Telegram] Primary api.telegram.org connection failed (); trying fallback IPs ...
+[Telegram] Fallback IP 149.154.167.220 failed:
+[Telegram] Primary api.telegram.org connection failed (); trying fallback IPs ...
+```
+
+…on an infinite loop. You'll burn an hour checking your token, your polling, your config. It's none of those. **It's the country.**
+
+```
+$ curl -s -o /dev/null -w "%{http_code}\n" https://api.telegram.org/
+000                      # every Bot API IP, IPv4 + IPv6
+$ curl -s -o /dev/null -w "%{http_code}\n" https://www.google.com
+200                      # the rest of the internet is fine
+```
+
+So this repo does the only sane thing: **tunnel just the Telegram Bot API through a working exit, and automate the whole mess** so you never think about it again.
+
+---
+
+## What it does
+
+A single script, `telegram_proxy_failover.py`, run on a 5-minute timer. Every tick, idempotently:
+
+| Situation | Action |
+|---|---|
+| `api.telegram.org` reachable **directly** | Remove the proxy, go direct, restart gateway once. (Block lifted → back to normal.) |
+| Blocked, current proxy **still works** | **Do nothing.** No restart, no churn. |
+| Blocked, current proxy **dead / unset** | Pick the first **live** SOCKS5 exit from the pool, write `TELEGRAM_PROXY`, restart gateway once. |
+| Blocked, whole pool **dead** | Fetch a fresh free SOCKS5 list (per country), find a live one, use it. |
+
+It only restarts your gateway when the working proxy **actually changes**, so running it every 5 minutes is cheap and quiet.
+
+Hermes already knows how to use `TELEGRAM_PROXY` (both the in-gateway polling adapter and the standalone `send_message` path read it and pass it to `httpx` / `python-telegram-bot`). This hotfix just keeps that variable pointed at something that *works*, forever, without you.
+
+---
+
+## Install
+
+```bash
+git clone https://github.com/vaibhavjnf/telegram-india-unblock.git
+cd telegram-india-unblock
+bash install.sh
+```
+
+or one-shot:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vaibhavjnf/telegram-india-unblock/main/install.sh | bash
+```
+
+That:
+1. Copies the script + proxy pool into `~/.hermes/telegram-india-unblock/`
+2. Runs an immediate heal (your bot comes back **now**)
+3. Installs a **launchd** timer (macOS) or **cron** entry (Linux), every 5 min, also at login/reboot
+
+### Status / logs / uninstall
+
+```bash
+python3 ~/.hermes/telegram-india-unblock/telegram_proxy_failover.py --status
+tail -f ~/.hermes/logs/telegram-proxy-failover.log
+bash install.sh --uninstall      # removes timer + proxy line, goes direct
+```
+
+`--status` example:
+
+```
+direct api.telegram.org reachable : no (ISP block)
+TELEGRAM_PROXY in ~/.hermes/.env  : socks5h://51.79.177.162:1010
+current proxy reaches Bot API     : yes (exit SG)
+overall                           : HEALTHY
+```
+
+---
+
+## How it works (the short version)
+
+- **Detection:** `curl` the Bot API directly. `000` = blocked. Any of `200/301/302/404` back = the wire reached Telegram.
+- **Proxy:** `TELEGRAM_PROXY=socks5h://host:port` in `~/.hermes/.env`. `socks5h` = remote DNS through the proxy (so the *exit* resolves Telegram, not your polluted local resolver).
+- **Pool:** `proxy_pool.txt`, lines of `CC host:port`. Country-priority order — **SG first** (closest to India ≈ lowest latency), then US. Free exits rot; the script auto-fetches fresh ones ([proxifly](https://github.com/proxifly/free-proxy-list)) and appends the live finds.
+- **Restart:** only when the `.env` value changes, via `launchctl kickstart` (macOS) — your gateway re-reads the proxy on boot.
+
+No bridge process needed — `httpx` (Hermes' HTTP client) speaks `socks5h://` natively via `socksio`, which Hermes already ships.
+
+---
+
+## Configuration (env vars, all optional)
+
+| Var | Default | Meaning |
+|---|---|---|
+| `HERMES_HOME` | `~/.hermes` | Hermes home (where `.env` and `logs/` live) |
+| `TGFAILOVER_GATEWAY_LABEL` | `ai.hermes.gateway` | launchd label to kickstart on change |
+| `TGFAILOVER_COUNTRIES` | `SG US` | exit-country priority |
+| `TGFAILOVER_POOL_FILE` | `./proxy_pool.txt` | the SOCKS5 pool |
+| `TGFAILOVER_ENV_FILE` | `$HERMES_HOME/.env` | where `TELEGRAM_PROXY` is written |
+
+Multiple Hermes profiles? Point `TGFAILOVER_ENV_FILE` / `HERMES_HOME` at each profile's `.env` and install one timer per profile (or just heal them all from one script — PRs welcome).
+
+---
+
+## A note on free proxies
+
+Free SOCKS5 exits are **unreliable by nature** — slow, rate-limited, here-today-gone-tomorrow. That's fine for keeping a long-lived **polling** connection alive (it tolerates a slow exit), and acceptable for bot replies. If you want rock-solid latency, drop your own paid exit / VPS / Tailscale exit-node into `proxy_pool.txt` as `SG your.host:port` and it'll be preferred. The automation is identical; only the quality of the pool changes.
+
+---
+
+## Why this exists / who it's for
+
+Anyone in a region that intermittently blocks Telegram (India especially, but the pattern is general) running an always-on bot or agent. Built against [Hermes / Claude Code](https://github.com/NousResearch/hermes-agent), but the core idea — *detect block → tunnel only the Bot API → self-heal → go direct when it lifts* — applies to any `python-telegram-bot` / `httpx`-based service.
+
+---
+
+## License
+
+MIT. Use it, fork it, ship it.
+
+Built by **Vaibhav Sharma** · X [@vabbyshabby](https://x.com/vabbyshabby) · while India was, once again, having a moment.

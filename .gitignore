@@ -1,0 +1,7 @@
+# local runtime / logs
+*.log
+*.bak-*
+__pycache__/
+*.pyc
+# don't commit live secrets if anyone drops an .env here
+.env
