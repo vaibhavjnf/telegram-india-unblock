@@ -22,6 +22,40 @@ Pure stdlib Python + `curl`. No new dependencies. Goes back to a direct connecti
 
 ---
 
+## ⚡ Quick start — one command
+
+```bash
+git clone https://github.com/vaibhavjnf/telegram-india-unblock.git
+cd telegram-india-unblock
+bash setup.sh
+```
+
+That's it. `setup.sh` walks you through it in plain language:
+
+1. **Checks** whether your ISP is actually blocking Telegram (vs. a real bug).
+2. **Asks** which fix you want — Cloudflare Worker (fast & permanent) or the zero-setup auto-proxy. Press Enter for the recommended one.
+3. **Deploys + wires it up** for you (sets Hermes' `base_url`, installs the safety net).
+4. **Restarts and verifies** end-to-end — it won't say "done" until a real Bot API call answers through the new path.
+
+```
+✓ api.telegram.org is BLOCKED but the rest of the internet is fine — classic ISP block.
+✓ Worker is live at https://tg-proxy.yourname.workers.dev
+✓ Pointed Hermes at the Worker
+✓ Gateway connected to Telegram through the Worker.
+✓ Live check passed — Bot API answered through the Worker (@yourbot).
+▸ All set ✓
+```
+
+Non-interactive (CI / scripted):
+```bash
+CF_API_TOKEN=*** CF_ACCOUNT_ID=xxx bash setup.sh --worker --yes   # Cloudflare Worker
+bash setup.sh --proxy --yes                                       # auto-proxy only
+```
+
+Prefer to understand the two options first? Read on.
+
+---
+
 ## The story: India has gone mad
 
 On a normal Tuesday in June 2026, half of India woke up to dead Telegram bots, dead Telegram apps, dead `web.telegram.org`. Not a Telegram outage — Telegram was up everywhere else on Earth. **Indian ISPs (Jio and friends) were null-routing Telegram's IP ranges again.**
