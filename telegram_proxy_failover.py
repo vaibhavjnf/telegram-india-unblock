@@ -374,7 +374,90 @@ def _restarted_recently() -> bool:
     return (time.time() - ts) < RESTART_COOLDOWN_MIN * 60
 
 
+def worker_base_url() -> str:
+    """If a Cloudflare-Worker (or any custom) Telegram base_url is configured in
+    Hermes' config.yaml under the telegram platform, return it — that means a
+    Worker is the PRIMARY path and the SOCKS5 failover should stand down. Empty
+    string if none configured. Uses yaml if available, else a scoped line scan
+    (the launchd timer's system python may not have PyYAML)."""
+    cfg = HERMES_HOME / "config.yaml"
+    if not cfg.exists():
+        return ""
+    text = cfg.read_text()
+
+    # Preferred: real yaml parse (only the telegram extra path).
+    try:
+        import yaml  # type: ignore
+        data = yaml.safe_load(text) or {}
+        for path in (
+            ("gateway", "platforms", "telegram", "extra", "base_url"),
+            ("platforms", "telegram", "extra", "base_url"),
+        ):
+            node = data
+            for k in path:
+                if isinstance(node, dict) and k in node:
+                    node = node[k]
+                else:
+                    node = None
+                    break
+            if isinstance(node, str) and node.startswith("http") \
+                    and "api.telegram.org" not in node:
+                return node
+        return ""
+    except Exception:
+        pass
+
+    # Fallback: indentation-scoped scan. Only accept a `base_url:` that sits
+    # inside a `telegram:` block (so we don't grab an unrelated base_url).
+    in_telegram = False
+    tg_indent = -1
+    for raw in text.splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        key = raw.strip()
+        if key.startswith("telegram:"):
+            in_telegram = True
+            tg_indent = indent
+            continue
+        if in_telegram:
+            # left the telegram block when we hit a key at <= its indent
+            if indent <= tg_indent and not key.startswith(("base_url", "base_file_url", "extra")):
+                in_telegram = False
+                continue
+            if key.startswith("base_url:"):
+                val = key.split(":", 1)[1].strip().strip('"').strip("'")
+                if val.startswith("http") and "api.telegram.org" not in val:
+                    return val
+    return ""
+
+
+def worker_reaches_telegram(base: str) -> bool:
+    """Does the configured Worker base_url answer? (homepage or any 200/302/404)."""
+    if not base:
+        return False
+    # base is like https://x.workers.dev/bot — probe the host root
+    try:
+        from urllib.parse import urlsplit
+        root = f"{urlsplit(base).scheme}://{urlsplit(base).netloc}/"
+    except Exception:
+        root = base
+    return _curl_code(root, None, timeout=10) in {"200", "301", "302", "404"}
+
+
 def heal() -> int:
+    # 0) Cloudflare-Worker primary path: if a Worker base_url is configured and
+    # healthy, the gateway reaches Telegram THROUGH the Worker (not direct, not a
+    # proxy). Stand down completely — don't inject a TELEGRAM_PROXY that would
+    # fight the base_url path. The Worker doesn't rot, so this is the steady state.
+    wb = worker_base_url()
+    if wb:
+        if worker_reaches_telegram(wb):
+            log(f"[heal] Cloudflare Worker base_url healthy ({wb}) -> failover stands down")
+            return 0
+        log(f"[heal] Worker base_url {wb} configured but UNREACHABLE -> "
+            "falling through to proxy failover as backup")
+        # fall through: Worker down, use the SOCKS5 layer as emergency backup
     cur = current_proxy()
     # 1) direct path healthy -> drop the proxy, go direct
     if direct_telegram_ok():
@@ -439,6 +522,11 @@ def check() -> int:
 def status() -> int:
     cur = current_proxy()
     direct = direct_telegram_ok()
+    wb = worker_base_url()
+    if wb:
+        wok = worker_reaches_telegram(wb)
+        print(f"Cloudflare Worker base_url         : {wb}")
+        print(f"  worker reachable (PRIMARY path)  : {'yes' if wok else 'NO'}")
     print(f"direct api.telegram.org reachable : {'yes' if direct else 'no (ISP block)'}")
     print(f"TELEGRAM_PROXY in {ENV_FILE}     : {cur or '(unset)'}")
     proxy_ok = False
@@ -455,6 +543,11 @@ def status() -> int:
         flag = "  ⚠ WEDGED?" if silent >= MAX_SILENT_MIN else ""
         print(f"telegram log quiet for            : {silent:.1f} min (wedge threshold {MAX_SILENT_MIN}m){flag}")
     print(f"gateway running                   : {'yes' if gateway_running() else 'NO'}")
+    # A healthy Worker is the PRIMARY path: if it answers, the channel is up
+    # regardless of proxy/direct/wedge state (idle gateway != wedged here).
+    if wb and worker_reaches_telegram(wb):
+        print("overall                           : HEALTHY (via Cloudflare Worker)")
+        return 0
     healthy = (direct and not cur) or (cur and proxy_ok)
     if healthy and silent is not None and silent >= MAX_SILENT_MIN and gateway_running():
         healthy = False  # reachable proxy but wedged poll = not healthy

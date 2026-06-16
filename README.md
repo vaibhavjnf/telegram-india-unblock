@@ -2,9 +2,23 @@
 
 **Your bot went silent. It's not your code. India blocked Telegram again.**
 
-A tiny, self-healing hotfix that keeps a [Hermes](https://github.com/NousResearch/hermes-agent) (Claude Code) gateway's **Telegram** channel alive when your ISP blocks `api.telegram.org` — by routing the Bot API through a live SOCKS5 exit, and re-routing automatically as proxies die or the block lifts.
+A self-healing hotfix that keeps a [Hermes](https://github.com/NousResearch/hermes-agent) (Claude Code) gateway's **Telegram** channel alive when your ISP blocks `api.telegram.org`.
 
-Pure stdlib Python + `curl`. No new dependencies. One command to install. Goes back to a direct connection on its own the moment the block lifts.
+It ships **two solutions** — use the first if you can spend 3 minutes once, the second if you want zero setup:
+
+| | **① Cloudflare Worker** (recommended) | **② SOCKS5 self-healer** (fallback) |
+|---|---|---|
+| What | A reverse-proxy on Cloudflare's edge; point your bot's `base_url` at it | A timer that routes the Bot API through a live free SOCKS5 exit |
+| Speed | **sub-second**, served from the nearest Cloudflare PoP | 2–25s (free-proxy cold handshake) |
+| Reliability | **permanent** — doesn't rot, can't be ISP-blocked | self-heals as free exits die/rotate |
+| Setup | one 3-minute deploy ([`cf-worker/`](cf-worker/)) | one command, no accounts |
+| Maintenance | none | none (automated) |
+
+**They compose.** Deploy the Worker as your primary path and keep the self-healer installed: it detects the Worker, **stands down** while the Worker is healthy, and only falls back to SOCKS5 if the Worker ever becomes unreachable. Defense in depth, fully automatic.
+
+→ **Recommended:** start with [`cf-worker/README.md`](cf-worker/README.md). The SOCKS5 layer below is the zero-setup option / backup.
+
+Pure stdlib Python + `curl`. No new dependencies. Goes back to a direct connection on its own the moment the block lifts.
 
 ---
 
