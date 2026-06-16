@@ -226,42 +226,47 @@ def fetch_fresh(country: str) -> list[str]:
 
 def pick_live_exit(min_latency_gain: float = 0.0) -> str | None:
     """Find the FASTEST SOCKS5 exit (socks5h://host:port) that reaches the Bot
-    API. Ranks candidates by round-trip latency, fastest-first, so we don't
-    settle on a marginal exit that stalls the long-poll. Country-priority is a
-    tiebreak: we collect a few live exits per country (preferred first), then
-    pick the lowest-latency overall."""
-    candidates: list[tuple[float, str, str]] = []  # (latency, proxy, cc)
+    API. Probes candidates CONCURRENTLY and ranks by round-trip latency,
+    fastest-first, so we don't settle on a marginal exit that stalls the
+    long-poll. Country-priority is a tiebreak."""
+    import concurrent.futures as _cf
 
-    def consider(hp: str, cc: str, fresh: bool) -> None:
+    def probe(item: tuple[str, str]) -> tuple[float, str, str] | None:
+        cc, hp = item
         proxy = f"socks5h://{hp}"
-        lat = proxy_latency(proxy)
+        lat = proxy_latency(proxy, timeout=9)
         if lat is not None:
-            candidates.append((lat, proxy, cc))
-            log(f"[pick] {'fresh ' if fresh else ''}{hp} ({cc}) reaches Telegram @ {lat:.2f}s")
-            if fresh:
-                append_pool(cc, hp)
+            return (lat, proxy, cc)
+        return None
 
-    # 1) seed pool, country priority order — gather live ones (don't early-return)
-    pool = read_pool()
-    for want in COUNTRIES:
-        for cc, hp in pool:
-            if cc == want:
-                consider(hp, cc, fresh=False)
-        # if a preferred country already gave us a fast (<3s) exit, stop scanning slower tiers
-        if any(lat < 3.0 and c == want for lat, _, c in candidates):
-            break
+    def run(items: list[tuple[str, str]], fresh: bool) -> list[tuple[float, str, str]]:
+        if not items:
+            return []
+        out: list[tuple[float, str, str]] = []
+        with _cf.ThreadPoolExecutor(max_workers=20) as ex:
+            for res in ex.map(probe, items):
+                if res:
+                    out.append(res)
+                    lat, proxy, cc = res
+                    log(f"[pick] {'fresh ' if fresh else ''}{proxy} ({cc}) reaches Telegram @ {lat:.2f}s")
+                    if fresh:
+                        append_pool(cc, proxy.split("://", 1)[1])
+        return out
 
-    # 2) nothing live in the seed pool -> fetch fresh per country
+    # 1) probe the whole seed pool in parallel (preferred countries only)
+    pool = [(cc, hp) for cc, hp in read_pool() if cc in COUNTRIES]
+    candidates = run(pool, fresh=False)
+
+    # 2) seed dry -> fetch fresh per country, probe those in parallel too
     if not candidates:
+        fresh_items: list[tuple[str, str]] = []
         for want in COUNTRIES:
             log(f"[pick] seed dry for {want}; fetching fresh list...")
-            for hp in fetch_fresh(want)[:30]:
-                if _exit_country(f"socks5h://{hp}") == want:
-                    consider(hp, want, fresh=True)
-                if any(c == want for _, _, c in candidates):
-                    break  # one good fresh exit per country is enough
-            if candidates:
-                break
+            fresh_items += [(want, hp) for hp in fetch_fresh(want)[:30]]
+        # dedup hosts
+        seen: set[str] = set()
+        fresh_items = [(cc, hp) for cc, hp in fresh_items if not (hp in seen or seen.add(hp))]
+        candidates = run(fresh_items, fresh=True)
 
     if not candidates:
         return None
@@ -282,6 +287,31 @@ def current_proxy() -> str:
     return (m.group(1).strip() if m else "").strip()
 
 
+# Proxy-friendly Telegram timeouts. Free SOCKS5 exits have a slow cold connect
+# handshake; Hermes' default connect timeout (10s) is too tight and the gateway
+# times out the connect even though the proxy works. We ensure these are set
+# (only when a proxy is active) so a reachable-but-slow proxy isn't seen as dead.
+_PROXY_TIMEOUTS = {
+    "HERMES_TELEGRAM_HTTP_CONNECT_TIMEOUT": "30",
+    "HERMES_TELEGRAM_HTTP_POOL_TIMEOUT": "20",
+    "HERMES_TELEGRAM_HTTP_READ_TIMEOUT": "40",
+}
+
+
+def _ensure_proxy_timeouts(text: str) -> str:
+    """Ensure the proxy-friendly Telegram timeout lines exist in env text."""
+    lines = text.splitlines()
+    have = {ln.split("=", 1)[0] for ln in lines if "=" in ln}
+    add = [f"{k}={v}" for k, v in _PROXY_TIMEOUTS.items() if k not in have]
+    if not add:
+        return text
+    if text and not text.endswith("\n"):
+        text += "\n"
+    text += "# telegram-india-unblock: loosened timeouts so a slow proxy isn't seen as dead\n"
+    text += "\n".join(add) + "\n"
+    return text
+
+
 def set_proxy(value: str | None) -> bool:
     """Write TELEGRAM_PROXY=value (or remove the line if value is None).
     Returns True if the file actually changed."""
@@ -298,6 +328,7 @@ def set_proxy(value: str | None) -> bool:
             text += "\n"
         text += "# telegram-india-unblock: ISP blocks api.telegram.org, route via SOCKS5 exit\n"
         text += f"TELEGRAM_PROXY={value}\n"
+        text = _ensure_proxy_timeouts(text)
     changed = (value or "") != had
     if changed:
         backup = ENV_FILE.with_suffix(ENV_FILE.suffix + f".bak-tgproxy-{int(time.time())}")

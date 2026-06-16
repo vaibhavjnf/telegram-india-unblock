@@ -55,6 +55,18 @@ Free SOCKS5 exits are flaky. A marginal one (~1-in-3 failure) can **stall the Te
 
 Hermes already knows how to use `TELEGRAM_PROXY` (both the in-gateway polling adapter and the standalone `send_message` path read it and pass it to `httpx` / `python-telegram-bot`). This hotfix just keeps that variable pointed at something that *works*, forever, without you.
 
+### Proxy-friendly timeouts (important)
+
+Free SOCKS5 exits pass a quick `curl` but their **cold connect handshake is slow** — often 10-25s. Hermes' default Telegram connect timeout is only 10s, so the gateway can keep *timing out the connect* even though the proxy is fine for short requests (you'll see `Connect attempt N/8 failed: Timed out` looping). The installer therefore also sets, in `~/.hermes/.env`:
+
+```
+HERMES_TELEGRAM_HTTP_CONNECT_TIMEOUT=30   # default 10 — give the proxy time to handshake
+HERMES_TELEGRAM_HTTP_POOL_TIMEOUT=20      # default 8
+HERMES_TELEGRAM_HTTP_READ_TIMEOUT=40      # default 20
+```
+
+These are stock Hermes knobs; they just need loosening when a proxy sits in the path. Without them, a perfectly reachable proxy can look "dead" to the gateway.
+
 ---
 
 ## Install
